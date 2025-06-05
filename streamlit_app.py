@@ -159,7 +159,7 @@ def main():
             st.markdown("### 📄 PDF Preview")
             pdf_images = render_pdf_as_images(file_bytes)
             for img in pdf_images:
-                st.image(img, use_column_width=True)
+                st.image(img, use_container_width=True)
 
         with col2:
             st.markdown("### What would you like to do? ")
