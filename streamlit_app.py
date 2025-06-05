@@ -4,18 +4,20 @@ import PyPDF2
 import base64
 import os
 import time
-from io import BytesIO
+import streamlit.components.v1 as components
 
 # === Secure API key from secrets ===
 co = cohere.Client(st.secrets["cohere"]["api_key"])
 
-def extract_text_from_pdf(file_stream):
-    pdf_reader = PyPDF2.PdfReader(file_stream)
+# Extract text from PDF
+def extract_text_from_pdf(file_path):
+    pdf_reader = PyPDF2.PdfReader(file_path)
     text = ""
     for page in pdf_reader.pages:
         text += page.extract_text() or ""
     return text
 
+# Chunking
 def chunk_text(text, max_chunk_size=2500):
     chunks = []
     start = 0
@@ -30,6 +32,7 @@ def chunk_text(text, max_chunk_size=2500):
         start = end
     return chunks
 
+# Cohere summary
 def cohere_chat_summary(text):
     try:
         response = co.chat(
@@ -54,6 +57,7 @@ def summarize_text(text):
         return cohere_chat_summary(combined[:2000])
     return combined
 
+# Q&A
 def generate_auto_qa(text, num_questions=5):
     prompt = f"Generate {num_questions} questions and answers from the following text:\n\n{text}\n\nFormat: Q1: ... A1: ... Q2: ... A2: ..."
     try:
@@ -80,11 +84,7 @@ def generate_answer(text, question):
     except Exception as e:
         return f"❌ API Error: {str(e)}"
 
-@st.cache_data(show_spinner=False)
-def render_pdf_view(pdf_bytes):
-    base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-    return f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600" type="application/pdf"></iframe>'
-
+# Download helpers
 def prepare_csv(content):
     lines = content.split("\n")
     rows = []
@@ -103,13 +103,23 @@ def prepare_csv(content):
     return csv_content
 
 def get_file_data(content, file_format):
-    if file_format == "txt" or file_format == "doc":
+    if file_format in ["txt", "doc"]:
         return content.encode()
     elif file_format == "csv":
         csv_content = prepare_csv(content)
         return csv_content.encode()
     return None
 
+# PDF Viewer (embed-based, browser safe)
+@st.cache_data(show_spinner=False)
+def render_pdf_view(pdf_bytes):
+    base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+    pdf_display = f'''
+        <embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600" type="application/pdf">
+    '''
+    return pdf_display
+
+# MAIN APP
 st.set_page_config(layout="wide")
 
 def main():
@@ -129,9 +139,17 @@ def main():
                     del st.session_state[key]
             st.session_state.last_uploaded_file = uploaded_file.name
 
-        pdf_bytes = uploaded_file.read()
+        if uploaded_file.size > 10 * 1024 * 1024:
+            st.error("❌ File too large! Please upload a PDF under 10MB.")
+            return
 
-        full_text = extract_text_from_pdf(BytesIO(pdf_bytes))
+        file_bytes = uploaded_file.read()
+        filepath = os.path.join("data", uploaded_file.name)
+        os.makedirs("data", exist_ok=True)
+        with open(filepath, "wb") as f:
+            f.write(file_bytes)
+
+        full_text = extract_text_from_pdf(filepath)
         if not full_text.strip():
             st.warning("⚠ No readable text found in the PDF.")
             return
@@ -144,8 +162,8 @@ def main():
 
         with col1:
             st.markdown("### 📄 PDF Preview")
-            pdf_html = render_pdf_view(pdf_bytes)
-            st.markdown(pdf_html, unsafe_allow_html=True)
+            pdf_html = render_pdf_view(file_bytes)
+            components.html(pdf_html, height=600, scrolling=True)
 
         with col2:
             st.markdown("### What would you like to do?")
@@ -189,14 +207,16 @@ def main():
                     if st.session_state.show_download_options:
                         selected = st.selectbox("Select download format", ["txt", "doc", "csv"], key="download_format_summary")
                         st.session_state.selected_format = selected
-
                         if st.session_state.selected_format:
                             file_data = get_file_data(st.session_state.output, st.session_state.selected_format)
                             file_name = f"summary.{st.session_state.selected_format}"
-                            st.download_button("Download", data=file_data, file_name=file_name,
-                                               mime=("text/plain" if file_name.endswith(".txt") else
-                                                     "application/msword" if file_name.endswith(".doc") else
-                                                     "text/csv"), key="download_summary_file")
+                            st.download_button(
+                                label="Download",
+                                data=file_data,
+                                file_name=file_name,
+                                mime=("text/plain" if file_name.endswith(".txt") else "application/msword" if file_name.endswith(".doc") else "text/csv"),
+                                key="download_summary_file"
+                            )
 
             elif option == "❓ Q&A":
                 qa_mode = st.radio("Choose Q&A Type:", ["🧠 Generate Questions", "🗨 Ask Your Question"], key="qa_mode")
@@ -227,14 +247,16 @@ def main():
                         if st.session_state.show_download_options:
                             selected = st.selectbox("Select download format", ["txt", "doc", "csv"], key="download_format_auto_qa")
                             st.session_state.selected_format = selected
-
                             if st.session_state.selected_format:
                                 file_data = get_file_data(st.session_state.output, st.session_state.selected_format)
                                 file_name = f"auto_qa.{st.session_state.selected_format}"
-                                st.download_button("Download", data=file_data, file_name=file_name,
-                                                   mime=("text/plain" if file_name.endswith(".txt") else
-                                                         "application/msword" if file_name.endswith(".doc") else
-                                                         "text/csv"), key="download_auto_qa_file")
+                                st.download_button(
+                                    label="Download",
+                                    data=file_data,
+                                    file_name=file_name,
+                                    mime=("text/plain" if file_name.endswith(".txt") else "application/msword" if file_name.endswith(".doc") else "text/csv"),
+                                    key="download_auto_qa_file"
+                                )
 
                 elif qa_mode == "🗨 Ask Your Question":
                     user_question = st.text_input("Enter your question:", key="user_question")
@@ -261,16 +283,18 @@ def main():
                         if st.session_state.show_download_options:
                             selected = st.selectbox("Select download format", ["txt", "doc", "csv"], key="download_format_custom_qa")
                             st.session_state.selected_format = selected
-
                             if st.session_state.selected_format:
                                 file_data = get_file_data(st.session_state.output, st.session_state.selected_format)
                                 file_name = f"custom_qa.{st.session_state.selected_format}"
-                                st.download_button("Download", data=file_data, file_name=file_name,
-                                                   mime=("text/plain" if file_name.endswith(".txt") else
-                                                         "application/msword" if file_name.endswith(".doc") else
-                                                         "text/csv"), key="download_custom_qa_file")
+                                st.download_button(
+                                    label="Download",
+                                    data=file_data,
+                                    file_name=file_name,
+                                    mime=("text/plain" if file_name.endswith(".txt") else "application/msword" if file_name.endswith(".doc") else "text/csv"),
+                                    key="download_custom_qa_file"
+                                )
     else:
         st.info("Please upload a PDF to start.")
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     main()
