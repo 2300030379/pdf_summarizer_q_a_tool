@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import cohere
 import PyPDF2
 import base64
@@ -9,7 +8,6 @@ import time
 # === Secure API key from secrets ===
 co = cohere.Client(st.secrets["cohere"]["api_key"])
 
-# === Extract text from PDF ===
 def extract_text_from_pdf(file_path):
     pdf_reader = PyPDF2.PdfReader(file_path)
     text = ""
@@ -17,7 +15,6 @@ def extract_text_from_pdf(file_path):
         text += page.extract_text() or ""
     return text
 
-# === Chunk text for long inputs ===
 def chunk_text(text, max_chunk_size=2500):
     chunks = []
     start = 0
@@ -32,7 +29,6 @@ def chunk_text(text, max_chunk_size=2500):
         start = end
     return chunks
 
-# === Cohere-based summary ===
 def cohere_chat_summary(text):
     try:
         response = co.chat(
@@ -51,13 +47,12 @@ def summarize_text(text):
     for chunk in chunks:
         summary = cohere_chat_summary(chunk)
         summaries.append(summary)
-        time.sleep(6)
+        time.sleep(6)  # rate limit safety
     combined = " ".join(summaries)
     if len(combined) > 2000:
         return cohere_chat_summary(combined[:2000])
     return combined
 
-# === Generate Q&A ===
 def generate_auto_qa(text, num_questions=5):
     prompt = (
         f"Generate {num_questions} questions and answers from the following text:\n\n{text}\n\nFormat: Q1: ... A1: ... Q2: ... A2: ..."
@@ -73,7 +68,6 @@ def generate_auto_qa(text, num_questions=5):
     except Exception as e:
         return f"❌ API Error: {str(e)}"
 
-# === Custom answer from user question ===
 def generate_answer(text, question):
     prompt = f"Answer the question based on this text:\n\n{text}\n\nQuestion: {question}"
     try:
@@ -87,28 +81,17 @@ def generate_answer(text, question):
     except Exception as e:
         return f"❌ API Error: {str(e)}"
 
-# === Fix for Chrome PDF preview using PDF.js ===
-def display_pdf_using_pdfjs(file_path):
-    with open(file_path, "rb") as f:
-        base64_pdf = base64.b64encode(f.read()).decode("utf-8")
-
-    pdf_html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            html, body {{ margin: 0; padding: 0; height: 100%; }}
-            iframe {{ width: 100%; height: 100%; border: none; }}
-        </style>
-    </head>
-    <body>
-        <iframe src="https://mozilla.github.io/pdf.js/web/viewer.html?file=data:application/pdf;base64,{base64_pdf}"></iframe>
-    </body>
-    </html>
+@st.cache_data(show_spinner=False)
+def display_pdf(path):
+    pdf_display = f"""
+    <iframe
+        src="data:application/pdf;base64,{base64.b64encode(open(path, "rb").read()).decode()}"
+        width="100%" height="600px"
+        style="border: none;">
+    </iframe>
     """
-    components.html(pdf_html, height=600, scrolling=False)
+    st.markdown(pdf_display, unsafe_allow_html=True)
 
-# === Convert result to CSV ===
 def prepare_csv(content):
     lines = content.split("\n")
     rows = []
@@ -126,7 +109,6 @@ def prepare_csv(content):
         csv_content = f"Text\n\"{content}\""
     return csv_content
 
-# === Get file download data ===
 def get_file_data(content, file_format):
     if file_format == "txt" or file_format == "doc":
         return content.encode()
@@ -135,80 +117,209 @@ def get_file_data(content, file_format):
         return csv_content.encode()
     return None
 
-# === Streamlit App ===
 st.set_page_config(layout="wide")
+
 def main():
     st.title("📄 PDF Summarizer + Q&A Tool")
 
-    uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+    uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"], key="pdf_uploader")
 
-    if uploaded_file is None:
+    if uploaded_file is None and st.session_state.get("last_uploaded_file") is not None:
+        for key in ["output", "output_type", "show_download_options", "selected_format", "last_option", "last_qa_mode", "last_uploaded_file"]:
+            if key in st.session_state:
+                del st.session_state[key]
+
+    if uploaded_file:
+        if st.session_state.get("last_uploaded_file") != uploaded_file.name:
+            for key in ["output", "output_type", "show_download_options", "selected_format", "last_option", "last_qa_mode"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.session_state.last_uploaded_file = uploaded_file.name
+
+        if uploaded_file.size > 10 * 1024 * 1024:
+            st.error("❌ File too large! Please upload a PDF under 10MB.")
+            return
+
+        os.makedirs("data", exist_ok=True)
+        filepath = os.path.join("data", uploaded_file.name)
+        with open(filepath, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+
+        full_text = extract_text_from_pdf(filepath)
+        if not full_text.strip():
+            st.warning("⚠ No readable text found in the PDF.")
+            return
+
+        if len(full_text) > 100_000:
+            st.warning("⚠ PDF content too long. Using only first 100,000 characters.")
+            full_text = full_text[:100_000]
+
+        col1, col2 = st.columns([1.2, 1])
+
+        with col1:
+            st.markdown("### 📄 PDF Preview")
+            display_pdf(filepath)
+
+        with col2:
+            st.markdown("### What would you like to do?")
+            option = st.radio("Choose an option:", ["📄 Summarize", "❓ Q&A"], key="main_option")
+
+            if "output" not in st.session_state:
+                st.session_state.output = ""
+            if "output_type" not in st.session_state:
+                st.session_state.output_type = ""
+            if "show_download_options" not in st.session_state:
+                st.session_state.show_download_options = False
+            if "selected_format" not in st.session_state:
+                st.session_state.selected_format = None
+
+            def reset_download():
+                st.session_state.show_download_options = False
+                st.session_state.selected_format = None
+
+            if "last_option" not in st.session_state or st.session_state.last_option != option:
+                st.session_state.output = ""
+                st.session_state.output_type = ""
+                reset_download()
+                st.session_state.last_option = option
+
+            if option == "📄 Summarize":
+                if st.button("Generate Summary", key="gen_summary"):
+                    with st.spinner("Generating summary..."):
+                        summary = summarize_text(full_text)
+                    st.session_state.output = summary
+                    st.session_state.output_type = "summary"
+                    reset_download()
+
+                if st.session_state.output_type == "summary" and st.session_state.output:
+                    st.subheader("📝 Summary")
+                    st.write(st.session_state.output)
+
+                    if not st.session_state.show_download_options:
+                        if st.button("Download Summary", key="download_summary_button"):
+                            st.session_state.show_download_options = True
+
+                    if st.session_state.show_download_options:
+                        selected = st.selectbox(
+                            "Select download format",
+                            ["txt", "doc", "csv"],
+                            key="download_format_summary"
+                        )
+                        st.session_state.selected_format = selected
+
+                        if st.session_state.selected_format:
+                            file_data = get_file_data(st.session_state.output, st.session_state.selected_format)
+                            file_name = f"summary.{st.session_state.selected_format}"
+
+                            st.download_button(
+                                label="Download",
+                                data=file_data,
+                                file_name=file_name,
+                                mime=(
+                                    "text/plain" if file_name.endswith(".txt") else
+                                    "application/msword" if file_name.endswith(".doc") else
+                                    "text/csv"
+                                ),
+                                key="download_summary_file"
+                            )
+
+            elif option == "❓ Q&A":
+                qa_mode = st.radio("Choose Q&A Type:", ["🧠 Generate Questions", "🗨 Ask Your Question"], key="qa_mode")
+
+                if "last_qa_mode" not in st.session_state or st.session_state.last_qa_mode != qa_mode:
+                    st.session_state.output = ""
+                    st.session_state.output_type = ""
+                    reset_download()
+                    st.session_state.last_qa_mode = qa_mode
+
+                if qa_mode == "🧠 Generate Questions":
+                    num_qs = st.slider("Number of Questions", 1, 10, 3, key="num_questions")
+                    if st.button("Generate Q&A", key="gen_auto_qa"):
+                        with st.spinner("Generating questions and answers..."):
+                            result = generate_auto_qa(full_text, num_qs)
+                        st.session_state.output = result
+                        st.session_state.output_type = "auto_qa"
+                        reset_download()
+
+                    if st.session_state.output_type == "auto_qa" and st.session_state.output:
+                        st.subheader("📚 Generated Q&A")
+                        st.write(st.session_state.output)
+
+                        if not st.session_state.show_download_options:
+                            if st.button("Download Q&A", key="download_auto_qa_button"):
+                                st.session_state.show_download_options = True
+
+                        if st.session_state.show_download_options:
+                            selected = st.selectbox(
+                                "Select download format",
+                                ["txt", "doc", "csv"],
+                                key="download_format_auto_qa"
+                            )
+                            st.session_state.selected_format = selected
+
+                            if st.session_state.selected_format:
+                                file_data = get_file_data(st.session_state.output, st.session_state.selected_format)
+                                file_name = f"auto_qa.{st.session_state.selected_format}"
+
+                                st.download_button(
+                                    label="Download",
+                                    data=file_data,
+                                    file_name=file_name,
+                                    mime=(
+                                        "text/plain" if file_name.endswith(".txt") else
+                                        "application/msword" if file_name.endswith(".doc") else
+                                        "text/csv"
+                                    ),
+                                    key="download_auto_qa_file"
+                                )
+
+                elif qa_mode == "🗨 Ask Your Question":
+                    user_question = st.text_input("Enter your question:", key="user_question")
+                    if st.button("Get Answer", key="get_answer"):
+                        with st.spinner("Finding the answer..."):
+                            result = generate_answer(full_text, user_question)
+                        st.session_state.output = f"Q: {user_question}\nA: {result}"
+                        st.session_state.output_type = "custom_qa"
+                        reset_download()
+
+                    if st.session_state.output_type == "custom_qa" and st.session_state.output:
+                        st.subheader("💬 Answer")
+                        try:
+                            q, a = st.session_state.output.split('\n', 1)
+                            st.markdown(f"**{q}**")
+                            st.markdown(a)
+                        except Exception:
+                            st.markdown(st.session_state.output)
+
+                        if not st.session_state.show_download_options:
+                            if st.button("Download Answer", key="download_custom_qa_button"):
+                                st.session_state.show_download_options = True
+
+                        if st.session_state.show_download_options:
+                            selected = st.selectbox(
+                                "Select download format",
+                                ["txt", "doc", "csv"],
+                                key="download_format_custom_qa"
+                            )
+                            st.session_state.selected_format = selected
+
+                            if st.session_state.selected_format:
+                                file_data = get_file_data(st.session_state.output, st.session_state.selected_format)
+                                file_name = f"custom_qa.{st.session_state.selected_format}"
+
+                                st.download_button(
+                                    label="Download",
+                                    data=file_data,
+                                    file_name=file_name,
+                                    mime=(
+                                        "text/plain" if file_name.endswith(".txt") else
+                                        "application/msword" if file_name.endswith(".doc") else
+                                        "text/csv"
+                                    ),
+                                    key="download_custom_qa_file"
+                                )
+    else:
         st.info("Please upload a PDF to start.")
-        return
-
-    if uploaded_file.size > 10 * 1024 * 1024:
-        st.error("❌ File too large! Please upload a PDF under 10MB.")
-        return
-
-    os.makedirs("data", exist_ok=True)
-    filepath = os.path.join("data", uploaded_file.name)
-    with open(filepath, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    full_text = extract_text_from_pdf(filepath)
-    if not full_text.strip():
-        st.warning("⚠ No readable text found in the PDF.")
-        return
-
-    if len(full_text) > 100_000:
-        st.warning("⚠ PDF content too long. Using only first 100,000 characters.")
-        full_text = full_text[:100_000]
-
-    col1, col2 = st.columns([1.2, 1])
-    with col1:
-        st.markdown("### 📄 PDF Preview")
-        display_pdf_using_pdfjs(filepath)
-
-    with col2:
-        st.markdown("### What would you like to do?")
-        option = st.radio("Choose an option:", ["📄 Summarize", "❓ Q&A"])
-
-        if option == "📄 Summarize":
-            if st.button("Generate Summary"):
-                with st.spinner("Summarizing..."):
-                    summary = summarize_text(full_text)
-                st.subheader("📝 Summary")
-                st.write(summary)
-
-                format = st.selectbox("Download as:", ["txt", "doc", "csv"])
-                data = get_file_data(summary, format)
-                st.download_button("Download Summary", data, f"summary.{format}")
-
-        elif option == "❓ Q&A":
-            qa_mode = st.radio("Q&A Type:", ["🧠 Auto-generate Q&A", "🗨 Ask Your Own Question"])
-            if qa_mode == "🧠 Auto-generate Q&A":
-                num_q = st.slider("Number of Questions", 1, 10, 3)
-                if st.button("Generate Q&A"):
-                    with st.spinner("Generating..."):
-                        qa = generate_auto_qa(full_text, num_q)
-                    st.subheader("📚 Q&A")
-                    st.write(qa)
-
-                    format = st.selectbox("Download as:", ["txt", "doc", "csv"])
-                    data = get_file_data(qa, format)
-                    st.download_button("Download Q&A", data, f"auto_qa.{format}")
-            else:
-                q = st.text_input("Your question:")
-                if st.button("Get Answer"):
-                    with st.spinner("Answering..."):
-                        ans = generate_answer(full_text, q)
-                    st.subheader("💬 Answer")
-                    st.markdown(f"**Q: {q}**")
-                    st.markdown(f"A: {ans}")
-
-                    format = st.selectbox("Download as:", ["txt", "doc", "csv"])
-                    data = get_file_data(f"Q: {q}\nA: {ans}", format)
-                    st.download_button("Download Answer", data, f"custom_qa.{format}")
 
 if __name__ == "__main__":
     main()
