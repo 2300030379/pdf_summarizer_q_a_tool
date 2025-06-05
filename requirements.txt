@@ -2,5 +2,5 @@ streamlit
 cohere
 PyPDF2
 pdfplumber
-pdf2image
 Pillow
+python-docx
