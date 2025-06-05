@@ -19,12 +19,6 @@ A Streamlit web application that allows users to upload PDF files and perform tw
 
 ---
 
-## Demo
-
-![Demo Screenshot](https://rb.gy/vry0f4) 
-
----
-
 ## Installation
 
 1. Clone the repository:
