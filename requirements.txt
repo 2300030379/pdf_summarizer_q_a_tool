@@ -2,6 +2,4 @@ streamlit
 cohere
 PyPDF2
 pdfplumber
-Pillow
-python-docx
-PyMuPDF
+
