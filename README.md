@@ -21,7 +21,7 @@ A Streamlit web application that allows users to upload PDF files and perform tw
 
 ## Demo
 
-![Demo Screenshot](C:\Users\anjal\OneDrive\Desktop\P) 
+![Demo Screenshot](https://rb.gy/vry0f4) 
 
 ---
 
