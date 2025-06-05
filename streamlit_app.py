@@ -272,5 +272,5 @@ def main():
     else:
         st.info("Please upload a PDF to start.")
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     main()
