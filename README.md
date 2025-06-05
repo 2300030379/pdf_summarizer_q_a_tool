@@ -41,7 +41,9 @@ pip install -r requirements.txt
 Create a .streamlit/secrets.toml file with your Cohere API key:
 
 [cohere]
+
 api_key = "your-cohere-api-key"
+
 ---
 ## Usage
 
