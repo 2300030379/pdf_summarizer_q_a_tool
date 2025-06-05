@@ -4,11 +4,11 @@ import PyPDF2
 import base64
 import os
 import time
-from pdf2image import convert_from_path
-from io import BytesIO
-from docx import Document
+import pdfplumber
+from PIL import Image
+import io
 
-# Initialize Cohere client securely from secrets
+# === Secure API key from secrets ===
 co = cohere.Client(st.secrets["cohere"]["api_key"])
 
 def extract_text_from_pdf(file_path):
@@ -84,6 +84,15 @@ def generate_answer(text, question):
     except Exception as e:
         return f"❌ API Error: {str(e)}"
 
+@st.cache_data(show_spinner=False)
+def render_pdf_as_images(pdf_bytes):
+    images = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            img = page.to_image(resolution=150).original
+            images.append(img)
+    return images
+
 def prepare_csv(content):
     lines = content.split("\n")
     rows = []
@@ -109,15 +118,6 @@ def get_file_data(content, file_format):
         return csv_content.encode()
     return None
 
-def render_pdf_images(file_path):
-    # Convert PDF pages to images
-    try:
-        images = convert_from_path(file_path, dpi=100)
-        return images
-    except Exception as e:
-        st.error(f"Error rendering PDF pages: {e}")
-        return []
-
 st.set_page_config(layout="wide")
 
 def main():
@@ -126,14 +126,13 @@ def main():
     uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"], key="pdf_uploader")
 
     if uploaded_file is None and st.session_state.get("last_uploaded_file") is not None:
-        # Clear session states if file removed
+        # File removed, clear everything
         for key in ["output", "output_type", "show_download_options", "selected_format", "last_option", "last_qa_mode", "last_uploaded_file"]:
             if key in st.session_state:
                 del st.session_state[key]
 
     if uploaded_file:
         if st.session_state.get("last_uploaded_file") != uploaded_file.name:
-            # New upload, reset outputs and states
             for key in ["output", "output_type", "show_download_options", "selected_format", "last_option", "last_qa_mode"]:
                 if key in st.session_state:
                     del st.session_state[key]
@@ -143,12 +142,9 @@ def main():
             st.error("❌ File too large! Please upload a PDF under 10MB.")
             return
 
-        os.makedirs("data", exist_ok=True)
-        filepath = os.path.join("data", uploaded_file.name)
-        with open(filepath, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+        file_bytes = uploaded_file.read()
 
-        full_text = extract_text_from_pdf(filepath)
+        full_text = extract_text_from_pdf(io.BytesIO(file_bytes))
         if not full_text.strip():
             st.warning("⚠ No readable text found in the PDF.")
             return
@@ -161,18 +157,14 @@ def main():
 
         with col1:
             st.markdown("### 📄 PDF Preview")
-            pdf_images = render_pdf_images(filepath)
-            if pdf_images:
-                for img in pdf_images:
-                    st.image(img, use_container_width=True)
-            else:
-                st.warning("Cannot render PDF preview.")
+            pdf_images = render_pdf_as_images(file_bytes)
+            for img in pdf_images:
+                st.image(img, use_column_width=True)
 
         with col2:
             st.markdown("### What would you like to do? ")
             option = st.radio("Choose an option:", ["📄 Summarize", "❓ Q&A"], key="main_option")
 
-            # Initialize session states if not present
             if "output" not in st.session_state:
                 st.session_state.output = ""
             if "output_type" not in st.session_state:
@@ -186,7 +178,6 @@ def main():
                 st.session_state.show_download_options = False
                 st.session_state.selected_format = None
 
-            # Clear output and download options if user changes option
             if "last_option" not in st.session_state or st.session_state.last_option != option:
                 st.session_state.output = ""
                 st.session_state.output_type = ""
@@ -236,7 +227,6 @@ def main():
             elif option == "❓ Q&A":
                 qa_mode = st.radio("Choose Q&A Type:", ["🧠 Generate Questions", "🗨 Ask Your Question"], key="qa_mode")
 
-                # Reset download if qa_mode changes
                 if "last_qa_mode" not in st.session_state or st.session_state.last_qa_mode != qa_mode:
                     st.session_state.output = ""
                     st.session_state.output_type = ""
