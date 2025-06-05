@@ -72,7 +72,9 @@ pdfplumber — PDF rendering for preview images.
 Pillow (PIL) — Image processing.
 
 Python 3.8+
+
 ---
+
 ## Notes & Limitations
 
 - PDF text extraction quality depends on the PDF content (scanned PDFs might not work well).
