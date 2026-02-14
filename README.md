@@ -83,4 +83,5 @@ Python 3.8+
 
 - Large PDFs are truncated to the first 100,000 characters for processing.
 
-- Summarization is chunk-based for better performance but might still lose some context.
+- Summarization is chunk-based for better performance but might still lose some context, we working on it, for better outcome
+  
