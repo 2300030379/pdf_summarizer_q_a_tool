@@ -2,326 +2,344 @@ import streamlit as st
 import cohere
 import PyPDF2
 import base64
-import os
-import time
-import pdfplumber
-from PIL import Image
 import io
+import time
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
 
-# === Secure API key from secrets ===
+# ================= CONFIG =================
+st.set_page_config(page_title="Automatic Text Summarization Tool", layout="wide")
+st.title("📄 Automatic Text Summarization + Q&A Tool")
+
 co = cohere.Client(st.secrets["cohere"]["api_key"])
+MAX_WORD_LIMIT = 15000
 
-def extract_text_from_pdf(file_path):
-    pdf_reader = PyPDF2.PdfReader(file_path)
+# ================= SESSION INIT =================
+def init_state():
+    defaults = {
+        "text": None,
+        "output": None,
+        "input_mode": None,
+        "file_bytes": None,
+        "file_type": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+init_state()
+
+# ================= RESET =================
+def reset_app():
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
+# ================= DISPLAY =================
+def display_pdf(file_bytes):
+    base64_pdf = base64.b64encode(file_bytes).decode("utf-8")
+    pdf_html = f"""
+        <iframe src="data:application/pdf;base64,{base64_pdf}"
+        width="100%" height="900px" style="border:none;"></iframe>
+    """
+    st.markdown(pdf_html, unsafe_allow_html=True)
+
+def display_text_preview(text):
+    st.text_area("File Preview", text, height=900, disabled=True)
+
+# ================= EXTRACTION =================
+def extract_pdf(file_bytes):
+    reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
     text = ""
-    for page in pdf_reader.pages:
+    for page in reader.pages:
         text += page.extract_text() or ""
-    return text
+    return text.strip()
 
-def chunk_text(text, max_chunk_size=2500):
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + max_chunk_size
-        period_pos = text.rfind('.', start, end)
-        if period_pos != -1:
-            end = period_pos + 1
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        start = end
-    return chunks
+def extract_docx(file_bytes):
+    doc = Document(io.BytesIO(file_bytes))
+    return "\n".join([p.text for p in doc.paragraphs]).strip()
 
-def cohere_chat_summary(text):
+def extract_txt(file_bytes):
+    return file_bytes.decode("utf-8", errors="ignore").strip()
+
+# ================= COHERE =================
+def cohere_chat(prompt, temperature=0.4, max_tokens=800):
     try:
         response = co.chat(
             model="command-xlarge-nightly",
-            message=f"Summarize this text clearly and concisely:\n\n{text}",
-            temperature=0.4,
-            max_tokens=300
+            message=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
         return response.text.strip()
     except Exception as e:
-        return f"❌ API Error: {str(e)}"
+        return f"API Error: {str(e)}"
 
-def summarize_text(text):
-    chunks = chunk_text(text)
-    summaries = []
-    for chunk in chunks:
-        summary = cohere_chat_summary(chunk)
-        summaries.append(summary)
-        time.sleep(6)  # rate limit safety
-    combined = " ".join(summaries)
-    if len(combined) > 2000:
-        return cohere_chat_summary(combined[:2000])
-    return combined
+# ================= SUMMARIZE =================
+def summarize_document(text):
+    prompt = f"Summarize clearly and concisely:\n\n{text}"
+    return cohere_chat(prompt)
 
-def generate_auto_qa(text, num_questions=5):
-    prompt = (
-        f"Generate {num_questions} questions and answers from the following text:\n\n{text}\n\nFormat: Q1: ... A1: ... Q2: ... A2: ..."
+# ================= Q&A =================
+def generate_qa(text, count):
+    prompt = f"""
+Generate {count} high-quality questions and answers.
+
+Format strictly:
+Q1:
+Answer...
+Q2:
+Answer...
+
+Text:
+{text}
+"""
+    return cohere_chat(prompt, max_tokens=1200)
+
+# ================= DOCX FORMAT =================
+def generate_docx(content, mode):
+    doc = Document()
+
+    title = doc.add_heading(
+        "Document Summary" if mode == "📄 Summarize" else "Questions & Answers",
+        level=1,
     )
-    try:
-        response = co.chat(
-            model="command-xlarge-nightly",
-            message=prompt,
-            temperature=0.5,
-            max_tokens=600
-        )
-        return response.text.strip()
-    except Exception as e:
-        return f"❌ API Error: {str(e)}"
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-def generate_answer(text, question):
-    prompt = f"Answer the question based on this text:\n\n{text}\n\nQuestion: {question}"
-    try:
-        response = co.chat(
-            model="command-xlarge-nightly",
-            message=prompt,
-            temperature=0.3,
-            max_tokens=200
-        )
-        return response.text.strip()
-    except Exception as e:
-        return f"❌ API Error: {str(e)}"
+    if mode == "📄 Summarize":
+        doc.add_paragraph(content)
 
-@st.cache_data(show_spinner=False)
-def render_pdf_as_images(pdf_bytes):
-    images = []
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for page in pdf.pages:
-            img = page.to_image(resolution=150).original
-            images.append(img)
-    return images
+    else:
+        lines = content.split("\n")
+        question = None
+        answer_lines = []
 
-def prepare_csv(content):
-    lines = content.split("\n")
-    rows = []
-    question = ""
-    answer = ""
-    if "Q1:" in content or "A1:" in content:
         for line in lines:
-            if line.strip().startswith("Q") and ":" in line:
-                question = line.split(":", 1)[1].strip()
-            elif line.strip().startswith("A") and ":" in line:
-                answer = line.split(":", 1)[1].strip()
-                rows.append(f'"{question}","{answer}"')
-        csv_content = "\n".join(["Question,Answer"] + rows)
+            line = line.strip()
+
+            if line.startswith("Q"):
+                if question:
+                    doc.add_heading(question, level=2)
+                    doc.add_paragraph(" ".join(answer_lines))
+                question = line
+                answer_lines = []
+            elif line:
+                answer_lines.append(line)
+
+        if question:
+            doc.add_heading(question, level=2)
+            doc.add_paragraph(" ".join(answer_lines))
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+# ================= PDF FORMAT =================
+def generate_pdf(content, mode):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    heading_style = styles["Heading1"]
+    normal_style = styles["Normal"]
+
+    story.append(Paragraph(
+        "Document Summary" if mode == "📄 Summarize" else "Questions & Answers",
+        heading_style
+    ))
+    story.append(Spacer(1, 0.5 * inch))
+
+    if mode == "📄 Summarize":
+        story.append(Paragraph(content.replace("&", "&amp;"), normal_style))
+
     else:
-        csv_content = f"Text\n\"{content}\""
-    return csv_content
+        lines = content.split("\n")
+        question = None
+        answer_lines = []
 
-def get_file_data(content, file_format):
-    if file_format == "txt" or file_format == "doc":
-        return content.encode()
-    elif file_format == "csv":
-        csv_content = prepare_csv(content)
-        return csv_content.encode()
-    return None
+        for line in lines:
+            line = line.strip()
 
-st.set_page_config(layout="wide")
+            if line.startswith("Q"):
+                if question:
+                    story.append(Paragraph(f"<b>{question}</b>", normal_style))
+                    story.append(Spacer(1, 0.2 * inch))
+                    story.append(Paragraph(" ".join(answer_lines), normal_style))
+                    story.append(Spacer(1, 0.4 * inch))
+                question = line
+                answer_lines = []
+            elif line:
+                answer_lines.append(line)
 
-def main():
-    st.title("📄 PDF Summarizer + Q&A Tool")
+        if question:
+            story.append(Paragraph(f"<b>{question}</b>", normal_style))
+            story.append(Spacer(1, 0.2 * inch))
+            story.append(Paragraph(" ".join(answer_lines), normal_style))
 
-    uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"], key="pdf_uploader")
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
 
-    if uploaded_file is None and st.session_state.get("last_uploaded_file") is not None:
-        # File removed, clear everything
-        for key in ["output", "output_type", "show_download_options", "selected_format", "last_option", "last_qa_mode", "last_uploaded_file"]:
-            if key in st.session_state:
-                del st.session_state[key]
+# ================= CSV =================
+def generate_csv(content):
+    rows = []
+    lines = content.split("\n")
+    question = None
+    answer_lines = []
 
-    if uploaded_file:
-        if st.session_state.get("last_uploaded_file") != uploaded_file.name:
-            for key in ["output", "output_type", "show_download_options", "selected_format", "last_option", "last_qa_mode"]:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.session_state.last_uploaded_file = uploaded_file.name
+    for line in lines:
+        line = line.strip()
+        if line.startswith("Q"):
+            if question:
+                rows.append((question, " ".join(answer_lines)))
+            question = line
+            answer_lines = []
+        elif line:
+            answer_lines.append(line)
 
-        if uploaded_file.size > 10 * 1024 * 1024:
-            st.error("❌ File too large! Please upload a PDF under 10MB.")
-            return
+    if question:
+        rows.append((question, " ".join(answer_lines)))
 
-        file_bytes = uploaded_file.read()
+    csv_content = "Question,Answer\n"
+    for q, a in rows:
+        csv_content += f'"{q}","{a}"\n'
 
-        full_text = extract_text_from_pdf(io.BytesIO(file_bytes))
-        if not full_text.strip():
-            st.warning("⚠ No readable text found in the PDF.")
-            return
+    return csv_content.encode("utf-8")
 
-        if len(full_text) > 100_000:
-            st.warning("⚠ PDF content too long. Using only first 100,000 characters.")
-            full_text = full_text[:100_000]
+# ================= INPUT =================
+uploaded_file = st.file_uploader(
+    "Upload a file (PDF, DOCX, TXT)",
+    type=["pdf", "docx", "txt"],
+)
 
-        col1, col2 = st.columns([1.2, 1])
+paste_text = st.text_area("Or paste your text here:", height=200)
 
+word_count = len(paste_text.split()) if paste_text else 0
+st.caption(f"Word Count: {word_count} / {MAX_WORD_LIMIT}")
+
+if word_count > MAX_WORD_LIMIT:
+    st.error("Word limit exceeded.")
+
+submit_text = st.button("Submit Text", disabled=word_count > MAX_WORD_LIMIT)
+
+if st.button("Reset Application"):
+    reset_app()
+
+if uploaded_file and paste_text:
+    st.error("Provide either file OR pasted text.")
+    st.stop()
+
+# ================= PROCESS INPUT =================
+if uploaded_file and not paste_text:
+    file_bytes = uploaded_file.read()
+    file_type = uploaded_file.name.split(".")[-1].lower()
+
+    st.session_state.file_bytes = file_bytes
+    st.session_state.file_type = file_type
+    st.session_state.input_mode = "file"
+
+    if file_type == "pdf":
+        st.session_state.text = extract_pdf(file_bytes)
+    elif file_type == "docx":
+        st.session_state.text = extract_docx(file_bytes)
+    elif file_type == "txt":
+        st.session_state.text = extract_txt(file_bytes)
+
+if paste_text and not uploaded_file and submit_text:
+    st.session_state.text = paste_text.strip()
+    st.session_state.input_mode = "paste"
+
+# ================= MAIN =================
+if st.session_state.text:
+
+    if st.session_state.input_mode == "file":
+        col1, col2 = st.columns([1.4, 1])
         with col1:
-            st.markdown("### 📄 PDF Preview")
-            pdf_images = render_pdf_as_images(file_bytes)
-            for img in pdf_images:
-                st.image(img, use_container_width=True)
-
-        with col2:
-            st.markdown("### What would you like to do? ")
-            option = st.radio("Choose an option:", ["📄 Summarize", "❓ Q&A"], key="main_option")
-
-            if "output" not in st.session_state:
-                st.session_state.output = ""
-            if "output_type" not in st.session_state:
-                st.session_state.output_type = ""
-            if "show_download_options" not in st.session_state:
-                st.session_state.show_download_options = False
-            if "selected_format" not in st.session_state:
-                st.session_state.selected_format = None
-
-            def reset_download():
-                st.session_state.show_download_options = False
-                st.session_state.selected_format = None
-
-            if "last_option" not in st.session_state or st.session_state.last_option != option:
-                st.session_state.output = ""
-                st.session_state.output_type = ""
-                reset_download()
-                st.session_state.last_option = option
-
-            if option == "📄 Summarize":
-                if st.button("Generate Summary", key="gen_summary"):
-                    with st.spinner("Generating summary..."):
-                        summary = summarize_text(full_text)
-                    st.session_state.output = summary
-                    st.session_state.output_type = "summary"
-                    reset_download()
-
-                if st.session_state.output_type == "summary" and st.session_state.output:
-                    st.subheader("📝 Summary")
-                    st.write(st.session_state.output)
-
-                    if not st.session_state.show_download_options:
-                        if st.button("Download Summary", key="download_summary_button"):
-                            st.session_state.show_download_options = True
-
-                    if st.session_state.show_download_options:
-                        selected = st.selectbox(
-                            "Select download format",
-                            ["txt", "doc", "csv"],
-                            key="download_format_summary"
-                        )
-                        st.session_state.selected_format = selected
-
-                        if st.session_state.selected_format:
-                            file_data = get_file_data(st.session_state.output, st.session_state.selected_format)
-                            file_name = f"summary.{st.session_state.selected_format}"
-
-                            st.download_button(
-                                label="Download",
-                                data=file_data,
-                                file_name=file_name,
-                                mime=(
-                                    "text/plain" if file_name.endswith(".txt") else
-                                    "application/msword" if file_name.endswith(".doc") else
-                                    "text/csv"
-                                ),
-                                key="download_summary_file"
-                            )
-
-            elif option == "❓ Q&A":
-                qa_mode = st.radio("Choose Q&A Type:", ["🧠 Generate Questions", "🗨 Ask Your Question"], key="qa_mode")
-
-                if "last_qa_mode" not in st.session_state or st.session_state.last_qa_mode != qa_mode:
-                    st.session_state.output = ""
-                    st.session_state.output_type = ""
-                    reset_download()
-                    st.session_state.last_qa_mode = qa_mode
-
-                if qa_mode == "🧠 Generate Questions":
-                    num_qs = st.slider("Number of Questions", 1, 10, 3, key="num_questions")
-                    if st.button("Generate Q&A", key="gen_auto_qa"):
-                        with st.spinner("Generating questions and answers..."):
-                            result = generate_auto_qa(full_text, num_qs)
-                        st.session_state.output = result
-                        st.session_state.output_type = "auto_qa"
-                        reset_download()
-
-                    if st.session_state.output_type == "auto_qa" and st.session_state.output:
-                        st.subheader("📚 Generated Q&A")
-                        st.write(st.session_state.output)
-
-                        if not st.session_state.show_download_options:
-                            if st.button("Download Q&A", key="download_auto_qa_button"):
-                                st.session_state.show_download_options = True
-
-                        if st.session_state.show_download_options:
-                            selected = st.selectbox(
-                                "Select download format",
-                                ["txt", "doc", "csv"],
-                                key="download_format_auto_qa"
-                            )
-                            st.session_state.selected_format = selected
-
-                            if st.session_state.selected_format:
-                                file_data = get_file_data(st.session_state.output, st.session_state.selected_format)
-                                file_name = f"auto_qa.{st.session_state.selected_format}"
-
-                                st.download_button(
-                                    label="Download",
-                                    data=file_data,
-                                    file_name=file_name,
-                                    mime=(
-                                        "text/plain" if file_name.endswith(".txt") else
-                                        "application/msword" if file_name.endswith(".doc") else
-                                        "text/csv"
-                                    ),
-                                    key="download_auto_qa_file"
-                                )
-
-                elif qa_mode == "🗨 Ask Your Question":
-                    user_question = st.text_input("Enter your question:", key="user_question")
-                    if st.button("Get Answer", key="get_answer"):
-                        with st.spinner("Finding the answer..."):
-                            result = generate_answer(full_text, user_question)
-                        st.session_state.output = f"Q: {user_question}\nA: {result}"
-                        st.session_state.output_type = "custom_qa"
-                        reset_download()
-
-                    if st.session_state.output_type == "custom_qa" and st.session_state.output:
-                        st.subheader("💬 Answer")
-                        try:
-                            q, a = st.session_state.output.split('\n', 1)
-                            st.markdown(f"{q}")
-                            st.markdown(a)
-                        except Exception:
-                            st.markdown(st.session_state.output)
-
-                        if not st.session_state.show_download_options:
-                            if st.button("Download Answer", key="download_custom_qa_button"):
-                                st.session_state.show_download_options = True
-
-                        if st.session_state.show_download_options:
-                            selected = st.selectbox(
-                                "Select download format",
-                                ["txt", "doc", "csv"],
-                                key="download_format_custom_qa"
-                            )
-                            st.session_state.selected_format = selected
-
-                            if st.session_state.selected_format:
-                                file_data = get_file_data(st.session_state.output, st.session_state.selected_format)
-                                file_name = f"custom_qa.{st.session_state.selected_format}"
-
-                                st.download_button(
-                                    label="Download",
-                                    data=file_data,
-                                    file_name=file_name,
-                                    mime=(
-                                        "text/plain" if file_name.endswith(".txt") else
-                                        "application/msword" if file_name.endswith(".doc") else
-                                        "text/csv"
-                                    ),
-                                    key="download_custom_qa_file"
-                                )
+            if st.session_state.file_type == "pdf":
+                display_pdf(st.session_state.file_bytes)
+            else:
+                display_text_preview(st.session_state.text)
+        ai_area = col2
     else:
-        st.info("Please upload a PDF to start.")
+        ai_area = st.container()
 
-if __name__ == "__main__":
-    main()
+    with ai_area:
+        st.markdown("## 🤖 AI Assistant")
+        mode = st.radio("Mode:", ["📄 Summarize", "❓ Q&A"])
 
+        if mode == "📄 Summarize":
+            if st.button("Generate Summary"):
+                with st.spinner("Processing..."):
+                    st.session_state.output = summarize_document(st.session_state.text)
+
+        else:
+            count = st.slider("Number of Questions", 1, 10, 3)
+            if st.button("Generate Q&A"):
+                with st.spinner("Generating..."):
+                    st.session_state.output = generate_qa(st.session_state.text, count)
+
+        if st.session_state.output:
+            st.markdown("---")
+            st.subheader("📌 Result")
+
+            if mode == "📄 Summarize":
+                st.markdown(st.session_state.output)
+            else:
+                lines = st.session_state.output.split("\n")
+                question = None
+                answer_lines = []
+
+                for line in lines:
+                    line = line.strip()
+                    if line.startswith("Q"):
+                        if question:
+                            st.markdown(f"### {question}")
+                            st.markdown(" ".join(answer_lines))
+                            st.markdown("---")
+                        question = line
+                        answer_lines = []
+                    elif line:
+                        answer_lines.append(line)
+
+                if question:
+                    st.markdown(f"### {question}")
+                    st.markdown(" ".join(answer_lines))
+                    st.markdown("---")
+
+            formats = ["txt", "docx", "pdf"] if mode == "📄 Summarize" else ["txt", "docx", "pdf", "csv"]
+            choice = st.selectbox("Download as:", formats)
+
+            if choice == "txt":
+                data = st.session_state.output.encode("utf-8")
+            elif choice == "docx":
+                data = generate_docx(st.session_state.output, mode)
+            elif choice == "pdf":
+                data = generate_pdf(st.session_state.output, mode)
+            else:
+                data = generate_csv(st.session_state.output)
+
+            mime_map = {
+                "txt": "text/plain",
+                "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "pdf": "application/pdf",
+                "csv": "text/csv",
+            }
+
+            st.download_button(
+                "Download File",
+                data=data,
+                file_name=f"output.{choice}",
+                mime=mime_map[choice],
+            )
+
+else:
+    st.info("Upload a file OR paste text to begin.")
