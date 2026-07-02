@@ -4,7 +4,6 @@ import PyPDF2
 import base64
 import io
 import time
-from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
