@@ -2,5 +2,4 @@ streamlit
 cohere
 PyPDF2
 pdfplumber
-
-
+Pillow
